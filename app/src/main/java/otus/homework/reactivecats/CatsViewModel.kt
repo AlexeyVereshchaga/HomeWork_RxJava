@@ -1,36 +1,57 @@
 package otus.homework.reactivecats
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import io.reactivex.Observable
 import io.reactivex.android.schedulers.AndroidSchedulers
-import io.reactivex.disposables.Disposable
+import io.reactivex.disposables.CompositeDisposable
 import io.reactivex.schedulers.Schedulers
 import io.reactivex.subjects.PublishSubject
+import retrofit2.HttpException
+import java.util.concurrent.TimeUnit
 
 class CatsViewModel(
-    catsService: CatsService,
-    localCatFactsGenerator: LocalCatFactsGenerator,
+    val catsService: CatsService,
+    val localCatFactsGenerator: LocalCatFactsGenerator,
     context: Context
 ) : ViewModel() {
 
     val catsSubject: PublishSubject<Result> = PublishSubject.create()
-    private var disposable: Disposable? = null
+    private var compositeDisposable = CompositeDisposable()
 
     init {
-        disposable = catsService.getCatFact()
-            .subscribeOn(Schedulers.io())
-            .observeOn(AndroidSchedulers.mainThread())
-            .subscribe(
-                { fact -> catsSubject.onNext(Success(fact)) },
-                { e -> catsSubject.onNext(Error(e.message ?: "Error")) }
-            )
+        getFacts()
     }
 
-    fun getFacts() {}
+    private fun getFacts() {
+        compositeDisposable.addAll(
+            Observable.interval(2000, TimeUnit.MILLISECONDS, Schedulers.io())
+                .map { catsService.getCatFact() }
+                .onErrorReturnItem(localCatFactsGenerator.generateCatFact().toObservable())
+                .subscribe { factObservable ->
+                    compositeDisposable.addAll(
+                        factObservable
+                            .onErrorResumeNext(
+                                localCatFactsGenerator.generateCatFact().toObservable()
+                            )
+                            .observeOn(AndroidSchedulers.mainThread())
+                            .subscribe(
+                                { fact -> catsSubject.onNext(Success(fact)) },
+                                { e ->
+                                    Log.e("", "Error", e)
+                                    when (e) {
+                                        is HttpException -> catsSubject.onNext(ServerError)
+                                        else -> catsSubject.onNext(Error(e.message ?: "Error"))
+                                    }
+                                }
+                            ))
+                })
+    }
 
     override fun onCleared() {
-        disposable?.dispose()
+        compositeDisposable.dispose()
         super.onCleared()
     }
 }
